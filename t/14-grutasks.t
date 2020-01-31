@@ -26,7 +26,6 @@ use OpenQA::Schema::Result::Jobs;
 use File::Copy;
 use OpenQA::SeleniumTest;
 use OpenQA::Test::Database;
-use Test::Output 'combined_like';
 use Test::MockModule;
 use Test::More;
 use Test::Mojo;
@@ -169,8 +168,12 @@ is($job_groups->find(1001)->exclusively_kept_asset_size,
 
 sub run_gru {
     my ($task, $args) = @_;
-    $t->app->gru->enqueue($task => $args);
-    $t->app->start('gru', 'run', '--oneshot');
+    my $id     = $t->app->gru->enqueue($task => $args)->{minion_id};
+    my $worker = $t->app->minion->worker->register;
+    my $job    = $worker->dequeue(0, {id => $id});
+    $job->perform;
+    $worker->unregister;
+    return $job;
 }
 
 # understanding / revising these tests requires understanding the
@@ -531,31 +534,18 @@ subtest 'download assets with correct permissions' => sub {
     # be sure the asset does not exist from a previous test run
     unlink($assetpath);
 
-    combined_like(
-        sub {
-            run_gru('download_asset' => [$assetsource, $assetpath, 0]);
-        },
-        qr/host $local_domain .* is not on the whitelist \(which is empty\)/,
-        'download refused if whitelist empty',
-    );
+    my $job = run_gru('download_asset' => [$assetsource, $assetpath, 0]);
+    like $job->info->{result}{output}, qr/host $local_domain .* is not on the whitelist \(which is empty\)/,
+      'download refused if whitelist empty';
 
     $t->app->config->{global}->{download_domains} = 'foo';
-    combined_like(
-        sub {
-            run_gru('download_asset' => [$assetsource, $assetpath, 0]);
-        },
-        qr/host $local_domain .* is not on the whitelist/,
-        'download refused if host not on whitelist',
-    );
+    $job = run_gru('download_asset' => [$assetsource, $assetpath, 0]);
+    like $job->info->{result}{output}, qr/host $local_domain .* is not on the whitelist/,
+      'download refused if host not on whitelist';
 
     $t->app->config->{global}->{download_domains} .= " $local_domain";
-    combined_like(
-        sub {
-            run_gru('download_asset' => [$assetsource . '.foo', $assetpath, 0]);
-        },
-        qr/404 response\:/,
-        'error code logged',
-    );
+    $job = run_gru('download_asset' => [$assetsource . '.foo', $assetpath, 0]);
+    like $job->info->{result}, qr/Core-7.2.iso" failed: 404 Not Found/, 'download failed';
 
     run_gru('download_asset' => [$assetsource, $assetpath, 0]);
     ok(-f $assetpath, 'asset downloaded');
